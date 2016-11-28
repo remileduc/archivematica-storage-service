@@ -115,6 +115,13 @@ class DSpaceForm(forms.ModelForm):
         model = models.DSpace
         fields = ('sd_iri', 'user', 'password', 'metadata_policy')
 
+
+class GPGForm(forms.ModelForm):
+    class Meta:
+        model = models.GPG
+        fields = ('credential_store')
+
+
 class LocalFilesystemForm(forms.ModelForm):
     class Meta:
         model = models.LocalFilesystem
