@@ -33,6 +33,21 @@ class GPG(models.Model):
         Location.BACKLOG,
     ]
 
+    def create_key_if_not_exists(self):
+        gpg = gnupg.GPG()
+        key_input_params = { 'name_real': 'Archivematica',
+            'name_email': 'admin@istrat.or',
+            'expire_date': '2014-04-01',
+            'key_type': 'RSA',
+            'key_length': 4096,
+            'key_usage': '',
+            'subkey_type': 'RSA',
+            'subkey_length': 4096,
+            'subkey_usage': 'encrypt,sign,auth',
+            'passphrase': 'sekrit'}
+        key_input = gpg.gen_key_input(**key_input_params)
+        archivematica_key = gpg.gen_key(key_input)
+
     def move_to_storage_service(self, src_path, dest_path, dest_space):
         """ Moves src_path to dest_space.staging_path/dest_path. """
         # Archivematica expects the file to still be on disk even after stored
