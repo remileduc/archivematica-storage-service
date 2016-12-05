@@ -2,6 +2,7 @@ from __future__ import absolute_import
 # stdlib, alphabetical
 import datetime
 import gnupg
+gpg = gnupg.GPG()
 import os
 
 # Core Django, alphabetical
@@ -34,30 +35,22 @@ class GPG(models.Model):
     ]
 
     def create_key_if_not_exists(self):
-        gpg = gnupg.GPG()
-        key_input_params = { 'name_real': 'Archivematica',
-            'name_email': 'admin@istrat.or',
-            'expire_date': '2014-04-01',
-            'key_type': 'RSA',
-            'key_length': 4096,
-            'key_usage': '',
-            'subkey_type': 'RSA',
-            'subkey_length': 4096,
-            'subkey_usage': 'encrypt,sign,auth',
-            'passphrase': 'sekrit'}
-        key_input = gpg.gen_key_input(**key_input_params)
-        archivematica_key = gpg.gen_key(key_input)
+        key_settings = gpg.gen_key_input(key_type='RSA', key_length=4096, key_usage="ESCA", passphrase='archivematica')
+        return gpg.import_keys(gpg.gen_key(key_settings))
 
     def move_to_storage_service(self, src_path, dest_path, dest_space):
         """ Moves src_path to dest_space.staging_path/dest_path. """
         # Archivematica expects the file to still be on disk even after stored
+        gpgkey = self.create_key_if_not_exists()
+        gpg.encrypt(src_path, gpgkey)
         self.space.create_local_directory(dest_path)
         return self.space.move_rsync(src_path, dest_path)
 
     def move_from_storage_service(self, source_path, destination_path, package=None):
         """ Moves self.staging_path/src_path to dest_path. """
         self.space.create_local_directory(destination_path)
-        return self.space.move_rsync(source_path, destination_path, try_mv_local=True)
+        self.space.move_rsync(source_path, destination_path, try_mv_local=True)
+        return gpg.decrypt_file(destination_path)
 
     def verify(self):
         """ Verify that the space is accessible to the storage service. """
