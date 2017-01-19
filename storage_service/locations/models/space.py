@@ -143,7 +143,7 @@ class Space(models.Model):
         (DURACLOUD, 'DuraCloud'),
         (DSPACE, 'DSpace via SWORD2 API'),
         (FEDORA, "FEDORA via SWORD2"),
-        (GPG, "GPG encryption on Local Filesystem")
+        (GPG, "GPG encryption on Local Filesystem"),
         (LOCAL_FILESYSTEM, "Local Filesystem"),
         (LOM, "LOCKSS-o-matic"),
         (NFS, "NFS"),
