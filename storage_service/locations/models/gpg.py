@@ -35,7 +35,12 @@ class GPG(models.Model):
     ]
 
     def create_key_if_not_exists(self):
-        key_settings = gpg.gen_key_input(key_type='RSA', key_length=4096, key_usage="ESCA", passphrase='archivematica')
+        key_settings = gpg.gen_key_input(
+            key_type='RSA',
+            key_length=4096,
+            key_usage="ESCA",  # HB: I think key_usage is supposed to be one of encrypt, sign or auth, not ECDSA
+            passphrase='archivematica'
+        )
         return gpg.import_keys(gpg.gen_key(key_settings))
 
     def move_to_storage_service(self, src_path, dest_path, dest_space):

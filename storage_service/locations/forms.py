@@ -119,7 +119,8 @@ class DSpaceForm(forms.ModelForm):
 class GPGForm(forms.ModelForm):
     class Meta:
         model = models.GPG
-        fields = ('credential_store')
+        #fields = ('credential_store',)
+        fields = ()
 
 
 class LocalFilesystemForm(forms.ModelForm):
