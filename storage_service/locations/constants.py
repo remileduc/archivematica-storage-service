@@ -38,8 +38,9 @@ PROTOCOL = {
     },
     models.Space.GPG: {
         'model': models.GPG,
-        'form': forms.GPGForm
+        'form': forms.GPGForm,
         # 'fields': ['credential_store']
+        'fields': []
     },
     # BUG: fields: [] works for obj_create, but includes everything in model_to_dict
     models.Space.LOCAL_FILESYSTEM: {
