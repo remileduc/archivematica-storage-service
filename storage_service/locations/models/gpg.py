@@ -25,7 +25,19 @@ GPG_KEY_PASSPHRASE = ''
 
 
 class GPG(models.Model):
-    """ Spaces found in the local filesystem of the storage service."""
+    """Space for storing things as files encrypted via GnuPG.
+
+    Testing TODOs. Places where ``move_to_storage_service`` is called:
+
+    - package.py::recover_aip
+    - package.py::store_aip
+    - package.py::backlog_transfer
+    - package.py::start_reingest DONE (works)
+    - package.py::finish_reingest (twice)
+    - package.py::fetch_local_path
+    - resources.py::post_detail
+
+    """
     space = models.OneToOneField('Space', to_field='uuid')
 
     class Meta:
@@ -38,23 +50,31 @@ class GPG(models.Model):
         #Location.BACKLOG,
     ]
 
-    def move_to_storage_service(self, src_path, dest_path, dest_space):
-        """Moves src_path to dest_space.staging_path/dest_path."""
-        LOGGER.debug('in move_to_storage_service of GPG')
-        LOGGER.debug('GPG move_to, src_path: %s', src_path)
-        LOGGER.debug('GPG move_to, dest_path: %s', dest_path)
-        self.space.create_local_directory(dest_path)
-        self.space.move_rsync(src_path, dest_path)
-        self._gpg_decrypt_in_situ(dest_path)
+    def move_to_storage_service(self, src_path, dst_path, dest_space):
+        """Moves src_path to dest_space.staging_path/dst_path. Note: we
+        implicitly assume that the encrypted file in this space has the '.gpg'
+        extension. After transport to the storage service, the decrypted file
+        will lack this extension.
+        """
+        src_path_encr = src_path + '.gpg'
+        dst_path_encr = dst_path + '.gpg'
+        LOGGER.debug('GPG ``move_to_storage_service``')
+        LOGGER.debug('GPG move_to_storage_service encrypted src_path: %s',
+                     src_path_encr)
+        LOGGER.debug('GPG move_to_storage_service encrypted dst_path: %s',
+                     dst_path_encr)
+        self.space.create_local_directory(dst_path_encr)
+        self.space.move_rsync(src_path_encr, dst_path_encr)
+        self._gpg_decrypt(dst_path)
 
-    def move_from_storage_service(self, source_path, destination_path, package=None):
-        """ Moves self.staging_path/source_path to destination_path. """
+    def move_from_storage_service(self, src_path, dst_path, package=None):
+        """Moves self.staging_path/src_path to dst_path. """
         LOGGER.debug('in move_from_storage_service of GPG')
-        LOGGER.debug('GPG move_from, source_path: %s', source_path)
-        LOGGER.debug('GPG move_from, destination_path: %s', destination_path)
-        self.space.create_local_directory(destination_path)
-        self.space.move_rsync(source_path, destination_path, try_mv_local=True)
-        self._gpg_encrypt_in_situ(destination_path)
+        LOGGER.debug('GPG move_from, src_path: %s', src_path)
+        LOGGER.debug('GPG move_from, dst_path: %s', dst_path)
+        self.space.create_local_directory(dst_path)
+        self.space.move_rsync(src_path, dst_path, try_mv_local=True)
+        self._gpg_encrypt(dst_path)
 
     def _browse(self, path):
         """At present we are not implementing a ``browse`` method for ``GPG``.
@@ -70,9 +90,10 @@ class GPG(models.Model):
         """
         pass
 
-    def _gpg_encrypt_in_situ(self, path):
-        """Use GnuPG to encrypt the file at ``path`` in situ. Note: deletes
-        unencrypted copy of file at ``path`` after a successful encryption.
+    def _gpg_encrypt(self, path):
+        """Use GnuPG to encrypt the file at ``path`` in situ. Note: we
+        implicitly suffix the '.gpg' extension to the encrypted file at
+        ``path``.
         Questions:
         - Should the unencrypted file at ``path`` be destroyed
           post-encryption (as is currently done)?
@@ -82,7 +103,8 @@ class GPG(models.Model):
         LOGGER.debug('Encrypting %s.', path)
         if os.path.isdir(path):
             raise Exception(
-                'GPG cannot encrypt a directory. Archive %s first!', path)
+                'GPG cannot encrypt a directory. Archive {} first!'.format(
+                    path))
         key = self._get_key()
         recipients = [key['fingerprint']]
         encr_path = path + '.gpg'
@@ -95,28 +117,30 @@ class GPG(models.Model):
         if os.path.isfile(encr_path):
             LOGGER.debug('Successfully encrypted %s', path)
             os.remove(path)
-            os.rename(encr_path, path)
         else:
             LOGGER.debug('Failed to encrypt %s; storing it unencrypted.', path)
 
-    def _gpg_decrypt_in_situ(self, path):
+    def _gpg_decrypt(self, path):
         """Use GnuPG to decrypt the file at path in situ.
         Note: this was tested by attempting to perform a partial re-ingest on
         an encrypted AIP. However, it appears that doing so does not trigger
         the calling of ``move_to_storage_service``...
         """
-        LOGGER.debug('Decrypting %s.', path)
-        output_path = path + '.decrypted'
-        with open(path, 'rb') as stream:
-            decrypted_data = gpg.decrypt_file(
-                stream,
-                output=output_path)
-        if os.path.isfile(output_path):
-            LOGGER.debug('Successfully decrypted %s', path)
-            os.remove(path)
-            os.rename(output_path, path)
+        encr_path = path + '.gpg'
+        LOGGER.debug('Decrypting %s.', encr_path)
+        if not os.path.isfile(encr_path):
+            LOGGER.error('There is no path at %s (%s) to decrypt.', path,
+                         encr_path)
+            raise Exception('Cannot decrypt file at {} ({}); no such'
+                            ' file.'.format(path, encr_path))
+        decr_path = path
+        with open(encr_path, 'rb') as stream:
+            gpg.decrypt_file(stream, output=decr_path)
+        if os.path.isfile(decr_path):
+            LOGGER.debug('Successfully decrypted %s (%s).', path, encr_path)
+            os.remove(encr_path)
         else:
-            LOGGER.debug('Failed to decrypt %s.', path)
+            LOGGER.debug('Failed to decrypt %s.', encr_path)
 
     def _get_key(self):
         """Check if our example key already exists. If it does, return it.
