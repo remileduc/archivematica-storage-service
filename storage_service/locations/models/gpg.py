@@ -19,6 +19,8 @@ from .location import Location
 LOGGER = logging.getLogger(__name__)
 
 
+# On a default vagrant/ansible deploy, the .gnupg/ dir will be at
+# /var/lib/archivematica/.gnupg/
 gpg = gnupg.GPG()
 GPG_KEY_REAL_NAME = 'Archivematica Key'
 GPG_KEY_PASSPHRASE = ''
@@ -30,6 +32,7 @@ class GPG(models.Model):
     Testing TODOs. Places where ``move_to_storage_service`` is called:
 
     - package.py::recover_aip
+      - locations/views.py::aip_recover_request
     - package.py::store_aip
     - package.py::backlog_transfer
     - package.py::start_reingest DONE (works)
