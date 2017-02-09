@@ -1,0 +1,26 @@
+{% extends "administration/base.html" %}
+
+{% block page_title %}Encryption Keys{% endblock %}
+
+{% block content %}
+
+  <p><a href="{% url 'key_create' %}">Create New Key</a>
+     &nbsp;|&nbsp;
+     <a href="{% url 'key_import' %}">Import Existing Key</a></p>
+  <table class="datatable">
+    <thead>
+      <tr>
+        <th>Key ID</th>
+        <th>Fingerprint</th>
+        <th>User ID(s)</th>
+      </tr>
+    </thead>
+    {% for key_display in keys %}
+      <tr>
+        <td>{{ key_display.keyid }}</td>
+        <td>{{ key_display.fingerprint }}</td>
+        <td>{{ key_display.uids|join:", " }}</td>
+      </tr>
+    {% endfor %}
+  </table>
+{% endblock %}

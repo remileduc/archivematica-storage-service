@@ -28,8 +28,7 @@ LOGGER = logging.getLogger(__name__)
 # On a default vagrant/ansible deploy, the .gnupg/ dir will be at
 # /var/lib/archivematica/.gnupg/
 gpg = gnupg.GPG()
-GPG_KEY_REAL_NAME = 'Archivematica Key'
-GPG_KEY_PASSPHRASE = ''
+
 
 
 class GPGException(Exception):
@@ -41,12 +40,15 @@ class GPG(models.Model):
 
     space = models.OneToOneField('Space', to_field='uuid')
 
+    key = models.CharField(
+        max_length=256,
+        verbose_name='GPG Private Key (fingerprint)',
+        help_text='The fingerprent of the GPG private key that will be able to'
+                  ' decrypt packages stored within this space.')
+
     class Meta:
         verbose_name = "GPG encryption on Local Filesystem"
         app_label = 'locations'
-
-    # Parsed pointer file
-    pointer_root = None
 
     ALLOWED_LOCATION_PURPOSE = [
         Location.AIP_STORAGE
@@ -63,10 +65,6 @@ class GPG(models.Model):
                      src_path)
         LOGGER.debug('GPG move_to_storage_service encrypted dst_path: %s',
                      dst_path)
-
-        #src_path_encr = src_path + '.gpg'
-        #dst_path_encr = dst_path + '.gpg'
-
         self.space.create_local_directory(dst_path)
         self.space.move_rsync(src_path, dst_path)
         #decr_path = self._gpg_decrypt(dst_path)
@@ -320,24 +318,27 @@ class GPG(models.Model):
         if key is None:
             # The ``gen_key_input`` method generates a string that GnuPG can
             # parse.
+            # Note the following defaults:
+            # - expiration date of 0, meaning the key never expires.
+            # TODO: 
             input_data = gpg.gen_key_input(
-                key_type='RSA',
-                key_length=4096,
-                name_real=GPG_KEY_REAL_NAME,
-                passphrase=GPG_KEY_PASSPHRASE
+                key_type=DFLT_KEY_TYPE,
+                key_length=DFLT_KEY_LENGTH,
+                name_real=DFLT_KEY_REAL_NAME,
+                passphrase=DFLT_KEY_PASSPHRASE
             )
             gpg.gen_key(input_data)
         return self._get_existing_key()
 
     def _get_existing_key(self):
-        """Return the Archivematica public GPG key as a Python dict; if it
-        doesn't exist, return ``None``.
+        """Return the Archivematica Storage Service public GPG key as a Python
+        dict; if it doesn't exist, return ``None``.
         """
         public_keys = gpg.list_keys()
         for key in public_keys:
-            uuids = key['uids']
-            for uuid in uuids:
-                if uuid.startswith(GPG_KEY_REAL_NAME):
+            uids = key['uids']
+            for uid in uids:
+                if uid.startswith(DFLT_KEY_REAL_NAME):
                     return key
         return None
 

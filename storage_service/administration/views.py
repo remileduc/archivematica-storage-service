@@ -6,7 +6,7 @@ from django.contrib.auth.forms import SetPasswordForm
 from django.shortcuts import render, redirect, get_object_or_404
 from tastypie.models import ApiKey
 
-from common import utils
+from common import utils, gpgutils
 from storage_service import __version__ as ss_version
 from . import forms as settings_forms
 
@@ -75,3 +75,57 @@ def user_create(request):
             user_form.cleaned_data['username']))
         return redirect('user_list')
     return render(request, 'administration/user_form.html', locals())
+
+
+########################## KEYS ##########################
+
+def key_list(request):
+    """List all of the GPG keys that the SS knows about."""
+    keys = gpgutils.get_gpg_key_list()
+    return render(request, 'administration/key_list.html', locals())
+
+def key_create(request):
+    """Create a new key using the POST params; currently these are just the
+    real name and email of the key's user/owner.
+    """
+    action = "Create"
+    key_form = settings_forms.KeyCreateForm(request.POST or None)
+    if key_form.is_valid():
+        cd = key_form.cleaned_data
+        key = gpgutils.generate_gpg_key(cd['name_real'], cd['name_email'])
+        if key:
+            messages.success(request, "New key {} created.".format(
+                key.fingerprint))
+            return redirect('key_list')
+        else:
+            messages.warning(
+                request,
+                "Failed to create key with real name '{}' and email"
+                " '{}'.".format(cd['name_real'], cd['name_email']))
+    return render(request, 'administration/key_form.html', locals())
+
+def key_import(request):
+    """Import an existing key to the storage service by providing its ASCII
+    armor in a form field. To get the ASCII armored private key with
+    fingerprint ``fingerprint`` via Python GnuPG::
+
+        >>> gpg.export_keys(fingerprint, True)
+
+    From the shell::
+
+        $ gpg --armor --export-secret-keys $FINGERPRINT
+    """
+    action = "Import"
+    key_form = settings_forms.KeyImportForm(request.POST or None)
+    if key_form.is_valid():
+        cd = key_form.cleaned_data
+        fingerprint = gpgutils.import_gpg_key(cd['ascii_armor'])
+        if fingerprint:
+            messages.success(request, "New key {} created.".format(
+                fingerprint))
+            return redirect('key_list')
+        else:
+            messages.warning(
+                request,
+                "Failed to create key with the supplied ASCII armor")
+    return render(request, 'administration/key_form.html', locals())
