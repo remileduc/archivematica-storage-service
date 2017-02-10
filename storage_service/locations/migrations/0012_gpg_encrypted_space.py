@@ -30,4 +30,9 @@ class Migration(migrations.Migration):
             name='space',
             field=models.OneToOneField(to='locations.Space', to_field=b'uuid'),
         ),
+        migrations.AddField(
+            model_name='gpg',
+            name='key',
+            field=models.CharField(help_text=b'The GnuPG private key that will be able to decrypt packages stored in this space.', max_length=256, verbose_name=b'GnuPG Private Key'),
+        )
     ]
