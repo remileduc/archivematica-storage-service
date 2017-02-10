@@ -112,6 +112,43 @@ def import_gpg_key(ascii_armor):
     return None
 
 
+def export_gpg_key(fingerprint):
+    """Return the ASCII armor (string) representation of the private key with
+    fingerprint ``fingerprint``.
+    """
+    return gpg.export_keys(fingerprint, True)
+
+
 def delete_gpg_key(fingerprint):
     """Delete the GPG key with fingerprint ``fingerprint``.  """
-    gpg.delete_keys(fingerprint)
+    result = gpg.delete_keys(fingerprint, True)
+    LOGGER.debug('result of calling gpg.delete_keys(%s)', fingerprint)
+    LOGGER.debug(str(result))
+    try:
+        assert str(result) == 'ok'
+        return True
+    except AssertionError:
+        return False
+
+
+def gpg_decrypt_file(path, decr_path):
+    """Use GPG to decrypt the file at ``path`` and save the decrypted file to
+    ``decr_path``.
+    """
+    with open(path, 'rb') as stream:
+        return gpg.decrypt_file(stream, output=decr_path)
+
+
+def gpg_encrypt_file(path, recipient_fingerprint)
+    """Use GPG to encrypt the file at ``path`` and make it decryptable only
+    with the key with fingerprint ``recipient_fingerprint``. The encrypted file
+    is given the .gpg extension and its path is returned.
+    """
+    encr_path = path + '.gpg'
+    with open(path, 'rb') as stream:
+        gpg.encrypt_file(
+            stream,
+            [recipient_fingerprint],
+            armor=False,
+            output=encr_path)
+    return encr_path

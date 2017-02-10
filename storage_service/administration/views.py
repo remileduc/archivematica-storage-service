@@ -1,8 +1,11 @@
+import logging
 import subprocess
 
 from django.contrib import messages
 from django.contrib.auth import get_user_model
 from django.contrib.auth.forms import SetPasswordForm
+from django.core.urlresolvers import reverse
+from django.http import Http404
 from django.shortcuts import render, redirect, get_object_or_404
 from django.template import RequestContext
 from tastypie.models import ApiKey
@@ -14,6 +17,9 @@ from common import decorators
 from storage_service import __version__ as ss_version
 from locations.models import GPG
 from . import forms as settings_forms
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 ########################## ADMIN ##########################
@@ -90,6 +96,19 @@ def key_list(request):
     return render(request, 'administration/key_list.html', locals())
 
 
+def key_detail(request, key_fingerprint):
+    """View details (including ASCII armor) of GPG key with fingerprint
+    ``key_fingerprint``.
+    """
+    key = gpgutils.get_gpg_key(key_fingerprint)
+    if not key:
+        raise Http404(
+            'GPG key with fingerprint {} does not exist.'.format(
+                key_fingerprint))
+    armor = gpgutils.export_gpg_key(key['fingerprint'])
+    return render(request, 'administration/key_detail.html', locals())
+
+
 def key_create(request):
     """Create a new key using the POST params; currently these are just the
     real name and email of the key's user/owner.
@@ -121,6 +140,11 @@ def key_import(request):
     From the shell::
 
         $ gpg --armor --export-secret-keys $FINGERPRINT
+
+    TODO: we should confirm that all keys that a user attempts to import have
+    empty passphrases. Otherwise, packages could get encrypted and SS (with no
+    way of prompting for a GPG passphrase at present) would not be able to
+    decrypt them. See http://blog.jasonantman.com/2013/08/testing-gpg-key-passphrases/
     """
     action = "Import"
     key_form = settings_forms.KeyImportForm(request.POST or None)
@@ -172,6 +196,14 @@ def key_delete(request, key_fingerprint):
         raise Http404(
             'GPG key with fingerprint {} does not exist.'.format(
                 key_fingerprint))
-    gpgutils.delete_gpg_key(key_fingerprint)
+    result = gpgutils.delete_gpg_key(key_fingerprint)
+    if result is True:
+        messages.success(
+            request,
+            'GPG key {} successfully deleted.'.format(key_fingerprint))
+    else:
+        messages.warning(
+            request,
+            'Failed to delete GPG key {}.'.format(key_fingerprint))
     next_url = request.GET.get('next', reverse('key_list'))
     return redirect(next_url)

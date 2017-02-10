@@ -17,7 +17,8 @@
     </thead>
     {% for key_display in keys %}
       <tr>
-        <td>{{ key_display.uids|join:", " }}</td>
+        <td><a href="{% url 'key_detail' key_display.fingerprint %}"
+               >{{ key_display.uids|join:", " }}</a></td>
         <td>{{ key_display.fingerprint }}</td>
         <td><a href="{% url 'key_delete' key_display.fingerprint %}?next={{ request.path }}">Delete</a></td>
       </tr>

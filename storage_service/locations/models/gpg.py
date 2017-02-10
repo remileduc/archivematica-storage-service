@@ -12,10 +12,10 @@ from django.db import models
 from django.utils import timezone
 
 # Third party dependencies, alphabetical
-import gnupg
 
 # This project, alphabetical
-from common import utils, gpgutils
+from common import utils
+from commom import gpgutils
 
 # This module, alphabetical
 from .location import Location
@@ -25,29 +25,41 @@ from .package import Package
 LOGGER = logging.getLogger(__name__)
 
 
-# On a default vagrant/ansible deploy, the .gnupg/ dir will be at
-# /var/lib/archivematica/.gnupg/
-gpg = gnupg.GPG()
-
-
-
 class GPGException(Exception):
     pass
 
 
 class GPG(models.Model):
-    """Space for storing things as files encrypted via GnuPG."""
+    """Space for storing things as files encrypted via GnuPG.
+    When an AIP is moved to a GPG space, it is encrypted with a
+    GPG-space-specific GPG public key and that encryption is documented in the
+    AIP's pointer file. When the AIP is moved out of a GPG space (e.g., for
+    re-ingest, download), it is decrypted. The intended use case is one wherein
+    encrypted AIPs may be transfered to other storage locations that are not
+    under the control of AM SS.
+
+    Note: this space has does not (currently) implement the ``browse`` or
+    ``delete_path`` methods.
+    """
 
     space = models.OneToOneField('Space', to_field='uuid')
 
+    # The ``key`` attribute of a GPG "space" is the fingerprint (string) of an
+    # existing GPG private key that this SS has access to. Note that GPG keys
+    # are not represented in the SS database. We rely on GPG for fetching and
+    # creating them.
+    # TODO: the following configuration will trigger Django into creating
+    # migrations that freeze deploy-specific GPG fingerprints in the migration,
+    # which is undesirable. For now, I've just manually modified the
+    # auto-created migration.
     keys = gpgutils.get_gpg_key_list()
-    KEY_CHOICES = [(key['fingerprint'], ', '.join(key['uids']))
-                    for key in gpgutils.get_gpg_key_list()]
-    SYSTEM_KEY = gpgutils.get_default_gpg_key(keys)
+    key_choices = [(key['fingerprint'], ', '.join(key['uids']))
+                   for key in gpgutils.get_gpg_key_list()]
+    system_key = gpgutils.get_default_gpg_key(keys)
     key = models.CharField(
         max_length=256,
-        choices=KEY_CHOICES,
-        default=SYSTEM_KEY['fingerprint'],
+        choices=key_choices,
+        default=system_key['fingerprint'],
         verbose_name='GnuPG Private Key',
         help_text='The GnuPG private key that will be able to'
                   ' decrypt packages stored in this space.')
@@ -61,10 +73,8 @@ class GPG(models.Model):
     ]
 
     def move_to_storage_service(self, src_path, dst_path, dst_space):
-        """Moves src_path to dst_path.
-        Note: we implicitly assume that the encrypted file in this space has
-        the '.gpg' extension. After transport to the storage service, the
-        decrypted file will lack this extension.
+        """Moves AIP at GPG space (at path ``src_path``) to SS at path
+        ``dst_path`` and decrypts it there.
         """
         LOGGER.debug('GPG ``move_to_storage_service``')
         LOGGER.debug('GPG move_to_storage_service encrypted src_path: %s',
@@ -73,11 +83,13 @@ class GPG(models.Model):
                      dst_path)
         self.space.create_local_directory(dst_path)
         self.space.move_rsync(src_path, dst_path)
-        #decr_path = self._gpg_decrypt(dst_path)
-
+        decr_path = self._gpg_decrypt(dst_path)
 
     def move_from_storage_service(self, src_path, dst_path, package=None):
-        """Moves self.staging_path/src_path to dst_path. """
+        """Moves AIP in SS at path ``src_path`` to GPG space at ``dst_path``,
+        encrypts it using the GPG Space's designated GPG ``key``, and updtes
+        the AIP's pointer file accordingly.
+        """
         LOGGER.debug('in move_from_storage_service of GPG')
         LOGGER.debug('GPG move_from, src_path: %s', src_path)
         LOGGER.debug('GPG move_from, dst_path: %s', dst_path)
@@ -88,25 +100,24 @@ class GPG(models.Model):
         try:
             encr_path = self._gpg_encrypt(dst_path)
         except GPGException:
-            # If we fail to encrypt, we move it back. Is this what should be done?
+            # If we fail to encrypt, we send it back where it done came from.
+            # TODO/QUESTION: Is this behaviour desirable?
             self.space.move_rsync(dst_path, src_path, try_mv_local=True)
             raise
         self._update_package(package, encr_path)
 
     def _update_package(self, package, encr_path):
+        """Update the package's (AIP's) ``current_path`` in the database as
+        well as its pointer file in order to reflect the encryption event it
+        has undergone.
         """
-        - update the package with the new current_path
-        - update the pointer file ...
-        TODO/QUESTION: should this be done here (in the SS) or in a new
-        micro-service chain link, e.g., one that occurs after "Store the AIP"?
-        """
-
-        # If we update the Package's current_path to the encrypted path here
-        # and save it in the db, then package.py::Package.store_aip will update
+        # We update the Package/AIP model's ``current_path`` to the encrypted
+        # (.gpg-suffixed) path here and save it in the db; as a consequence,
+        # package.py::Package.store_aip will update
         # mets:file/mets:FLocat[@xlink:href] appropriately.
         package.current_path = encr_path
         package.save()
-        # Update pointer file to contain a record of the encryption.
+        # Update the pointer file to contain a record of the encryption.
         # TODO/QUESTION: Allow for AICs too?
         if (    package.pointer_file_path and
                 package.package_type in (Package.AIP,)):
@@ -119,19 +130,25 @@ class GPG(models.Model):
             if package.uuid in file_el.get('ID', ''):
                 # TODO/QUESTION: for compression with 7z using bzip2, the
                 # algorithm is "bzip2". Should the algorithm here be "gpg" or
-                # "AES256"?
+                # something else?
                 algorithm = 'gpg'
-                # TODO/QUESTION: add a TRANSFORMKEY attr with the id of the GPG
-                # private key needed to decrypt this AIP? From METS docs: "A
-                # key to be used with the transform algorithm for accessing the
-                # file's contents."
-                etree.SubElement(file_el, metsBNS + "transformFile",
+                # TODO/QUESTION: here we add a TRANSFORMKEY attr valuated to
+                # the fingerprint of the GPG private key needed to decrypt this
+                # AIP. Is this correct? From METS docs: "A key to be used with
+                # the transform algorithm for accessing the file's contents."
+                etree.SubElement(
+                    file_el,
+                    metsBNS + "transformFile",
                     TRANSFORMORDER='1',
                     TRANSFORMTYPE='decryption',
-                    TRANSFORMALGORITHM=algorithm)
+                    TRANSFORMALGORITHM=algorithm,
+                    TRANSFORMKEY=self.key
+                )
                 # Decompression <transformFile> must have its TRANSFORMORDER
                 # attr changed to '2', because decryption is a precondition to
                 # decompression.
+                # TODO: does the logic here need to be more sophisticated? How
+                # many <mets:transformFile> elements can there be?
                 decompr_transform_el = file_el.find(
                     'mets:transformFile[@TRANSFORMTYPE="decompression"]',
                     namespaces=utils.NSMAP)
@@ -145,13 +162,9 @@ class GPG(models.Model):
             # events and agents in the pipeline's database. In this case, we are
             # encrypting in the storage service and creating PREMIS events in the
             # pointer file that are *not* also recorded in the database (SS's or
-            # AM's). Seems like maybe encryption should occur as a micro-service
-            # in the pipeline.
+            # AM's). Just pointint out the discrepancy.
             amdsec = root.find('.//mets:amdSec', namespaces=utils.NSMAP)
-            # E = ElementMaker(namespace=utils.NSMAP['mets'], nsmap=utils.NSMAP)
-            # etree.SubElement(amdsec
             next_digiprov_md_id = self.get_next_digiprov_md_id(root)
-            print('next digiprovMD ID: {}'.format(next_digiprov_md_id))
             digiprovMD = etree.Element(
                 metsBNS + 'digiprovMD',
                 ID=next_digiprov_md_id)
@@ -163,6 +176,7 @@ class GPG(models.Model):
             xmlData.append(self.create_encr_event(root))
             amdsec.append(digiprovMD)
 
+            # Write the modified pointer file to disk.
             with open(pointer_absolute_path, 'w') as fileo:
                 fileo.write(etree.tostring(root, pretty_print=True))
 
@@ -170,10 +184,16 @@ class GPG(models.Model):
         """Returns a PREMIS Event for the encryption."""
         # The following vars would typically come from an AM Events model.
         encr_event_type = 'encryption'
+        # Note the UUID is created here with no other record besides the
+        # pointer file.
         encr_event_uuid = str(uuid4())
         encr_event_datetime = timezone.now().isoformat()
+        # TODO/QUESTION: this is listing the Python GnuPG version. Probably
+        # important to also get the system GnuPG version also?
         encr_event_detail = escape(
             'program=python-gnupg; version={}'.format(gnupg.__version__))
+        # Maybe these should be defined in utils like they are in the
+        # dashboard's namespaces.py...
         premisNS = utils.NSMAP['premis']
         premisBNS = '{' + premisNS + '}'
         xsiNS = utils.NSMAP['xsi']
@@ -211,13 +231,16 @@ class GPG(models.Model):
         eventOutcomeDetail = etree.SubElement(
             eventOutcomeInformation,
             premisBNS + 'eventOutcomeDetail')
+        # TODO: Python GnuPG doesn't give output during encryption. At least, I
+        # couldn't easily find it. What should the text of the
+        # <eventOutcomeDetailNote> element be here?
         etree.SubElement(
             eventOutcomeDetail,
             premisBNS + 'eventOutcomeDetailNote').text = escape(
                 'Yay, GnuPG encryption worked!')
-            # Copy the existing <premis:agentIdentifier> data to
-            # <premis:linkingAgentIdentifier> elements in our encryption
-            # <premis:event>
+        # Copy the existing <premis:agentIdentifier> data to
+        # <premis:linkingAgentIdentifier> elements in our encryption
+        # <premis:event>
         for agent_id_el in root.findall(
                 './/premis:agentIdentifier', namespaces=utils.NSMAP):
             agent_id_type = agent_id_el.find('premis:agentIdentifierType',
@@ -236,6 +259,9 @@ class GPG(models.Model):
         return event
 
     def get_next_digiprov_md_id(self, root):
+        """Return the next digiprovMD ID attribute; something like
+        ``'digiprovMD_X'``, where X is an int.
+        """
         ids = []
         for digiprov_md_el in root.findall(
                 './/mets:digiprovMD', namespaces=utils.NSMAP):
@@ -246,24 +272,10 @@ class GPG(models.Model):
             return 'digiprovMD_{}'.format(max(ids) + 1)
         return 'digiprovMD_1'
 
-    def _browse(self, path):
-        """At present we are not implementing a ``browse`` method for ``GPG``.
-        This means that calls to ``browse`` will be routed to
-        ``Space.browse_local``, which may be fine.
-        """
-        pass
-
-    def _delete_path(self, delete_path):
-        """At present we are not implementing a ``delete_path`` method for
-        ``GPG``. This means that calls to ``delete_path`` will be routed to
-        ``Space._delete_path_local``, which may be fine.
-        """
-        pass
-
     def _gpg_encrypt(self, path):
-        """Use GnuPG to encrypt the file at ``path`` in situ. Note: we
-        add a '.gpg' extension to the encrypted file at ``path``.
-        Questions:
+        """Use GnuPG to encrypt the file at ``path`` using this GPG Space's GPG
+        key.
+        TODO/QUESTIONS:
         - Should the unencrypted file at ``path`` be destroyed
           post-encryption (as is currently done)?
         - How to handle ``path`` as directory? Currently raising an exception
@@ -273,17 +285,9 @@ class GPG(models.Model):
             raise GPGException(
                 'GPG cannot encrypt a directory. Archive {} first!'.format(
                     path))
-        key = self._get_key()
-        recipients = [key['fingerprint']]
-        encr_path = path + '.gpg'
-        with open(path, 'rb') as stream:
-            gpg.encrypt_file(
-                stream,
-                recipients,
-                armor=False,
-                output=encr_path)
+        encr_path = gpgutils.gpg_encrypt_file(path, self.key)
         if os.path.isfile(encr_path):
-            LOGGER.debug('Successfully encrypted %s', path)
+            LOGGER.debug('Successfully encrypted %s at %s', path, encr_path)
             os.remove(path)
             return encr_path
         else:
@@ -293,60 +297,25 @@ class GPG(models.Model):
                 ' {}'.format(path))
 
     def _gpg_decrypt(self, path):
-        """Use GnuPG to decrypt the file at path in situ.
-        Note: this was tested by attempting to perform a partial re-ingest on
-        an encrypted AIP. However, it appears that doing so does not trigger
-        the calling of ``move_to_storage_service``...
+        """Use GnuPG to decrypt the file at ``path`` and then delete the
+        encrypted file.
         """
-        #encr_path = path + '.gpg'
         LOGGER.debug('Decrypting %s.', path)
         if not os.path.isfile(path):
             LOGGER.error('There is no path at %s to decrypt.', path)
             raise GPGException('Cannot decrypt file at {}; no such'
                             ' file.'.format(path))
         decr_path, _ = os.path.splitext(path)
-        with open(path, 'rb') as stream:
-            gpg.decrypt_file(stream, output=decr_path)
-        if os.path.isfile(decr_path):
+        decr_result = gpgutils.gpg_decrypt_file(path, decr_path)
+        if decr_result.ok and os.path.isfile(decr_path):
             LOGGER.debug('Successfully decrypted %s.', path)
             os.remove(path)
             return decr_path
         else:
-            LOGGER.debug('Failed to decrypt %s.', path)
-            raise GPGException('Failed to decrypt file at {}'.format(path))
-
-    def _get_key(self):
-        """Check if our example key already exists. If it does, return it.
-        If it doesn't, generate it. Returns a Python dict representation of the
-        GPG key.
-        """
-        key = self._get_existing_key()
-        if key is None:
-            # The ``gen_key_input`` method generates a string that GnuPG can
-            # parse.
-            # Note the following defaults:
-            # - expiration date of 0, meaning the key never expires.
-            # TODO: 
-            input_data = gpg.gen_key_input(
-                key_type=DFLT_KEY_TYPE,
-                key_length=DFLT_KEY_LENGTH,
-                name_real=DFLT_KEY_REAL_NAME,
-                passphrase=DFLT_KEY_PASSPHRASE
-            )
-            gpg.gen_key(input_data)
-        return self._get_existing_key()
-
-    def _get_existing_key(self):
-        """Return the Archivematica Storage Service public GPG key as a Python
-        dict; if it doesn't exist, return ``None``.
-        """
-        public_keys = gpg.list_keys()
-        for key in public_keys:
-            uids = key['uids']
-            for uid in uids:
-                if uid.startswith(DFLT_KEY_REAL_NAME):
-                    return key
-        return None
+            LOGGER.debug('Failed to decrypt %s. Reason: %s', path,
+                         decr_result.status)
+            raise GPGException('Failed to decrypt file at {}. Reason:'
+                               ' {}'.format(path, decr_result.status))
 
     def verify(self):
         """ Verify that the space is accessible to the storage service. """
