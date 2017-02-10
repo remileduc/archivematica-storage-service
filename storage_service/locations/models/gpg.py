@@ -15,7 +15,7 @@ from django.utils import timezone
 import gnupg
 
 # This project, alphabetical
-from common import utils
+from common import utils, gpgutils
 
 # This module, alphabetical
 from .location import Location
@@ -40,11 +40,17 @@ class GPG(models.Model):
 
     space = models.OneToOneField('Space', to_field='uuid')
 
+    keys = gpgutils.get_gpg_key_list()
+    KEY_CHOICES = [(key['fingerprint'], ', '.join(key['uids']))
+                    for key in gpgutils.get_gpg_key_list()]
+    SYSTEM_KEY = gpgutils.get_default_gpg_key(keys)
     key = models.CharField(
         max_length=256,
-        verbose_name='GPG Private Key (fingerprint)',
-        help_text='The fingerprent of the GPG private key that will be able to'
-                  ' decrypt packages stored within this space.')
+        choices=KEY_CHOICES,
+        default=SYSTEM_KEY['fingerprint'],
+        verbose_name='GnuPG Private Key',
+        help_text='The GnuPG private key that will be able to'
+                  ' decrypt packages stored in this space.')
 
     class Meta:
         verbose_name = "GPG encryption on Local Filesystem"

@@ -110,3 +110,8 @@ def import_gpg_key(ascii_armor):
     if import_result.count == 1:
         return import_result.fingerprints[0]
     return None
+
+
+def delete_gpg_key(fingerprint):
+    """Delete the GPG key with fingerprint ``fingerprint``.  """
+    gpg.delete_keys(fingerprint)

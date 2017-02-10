@@ -6,6 +6,7 @@ import django.core.exceptions
 from django.db.models import Count
 
 from locations import models
+from common import gpgutils
 
 
 # CUSTOM WIDGETS
@@ -119,8 +120,7 @@ class DSpaceForm(forms.ModelForm):
 class GPGForm(forms.ModelForm):
     class Meta:
         model = models.GPG
-        #fields = ('credential_store',)
-        fields = ()
+        fields = ('key',)
 
 
 class LocalFilesystemForm(forms.ModelForm):

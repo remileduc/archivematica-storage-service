@@ -10,16 +10,16 @@
   <table class="datatable">
     <thead>
       <tr>
-        <th>Key ID</th>
-        <th>Fingerprint</th>
         <th>User ID(s)</th>
+        <th>Fingerprint</th>
+        <th>Actions</th>
       </tr>
     </thead>
     {% for key_display in keys %}
       <tr>
-        <td>{{ key_display.keyid }}</td>
-        <td>{{ key_display.fingerprint }}</td>
         <td>{{ key_display.uids|join:", " }}</td>
+        <td>{{ key_display.fingerprint }}</td>
+        <td><a href="{% url 'key_delete' key_display.fingerprint %}?next={{ request.path }}">Delete</a></td>
       </tr>
     {% endfor %}
   </table>

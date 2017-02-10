@@ -20,5 +20,7 @@ urlpatterns = [
     url(r'^keys/$', views.key_list, name='key_list'),
     url(r'^keys/create/$', views.key_create, name='key_create'),
     url(r'^keys/import/$', views.key_import, name='key_import'),
+    url(r'^keys/(?P<key_fingerprint>[\w]+)/delete/$',
+        views.key_delete, name='key_delete'),
 
 ]
