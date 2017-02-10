@@ -15,7 +15,7 @@ from django.utils import timezone
 
 # This project, alphabetical
 from common import utils
-from commom import gpgutils
+from common import gpgutils
 
 # This module, alphabetical
 from .location import Location
