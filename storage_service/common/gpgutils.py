@@ -139,7 +139,7 @@ def gpg_decrypt_file(path, decr_path):
         return gpg.decrypt_file(stream, output=decr_path)
 
 
-def gpg_encrypt_file(path, recipient_fingerprint)
+def gpg_encrypt_file(path, recipient_fingerprint):
     """Use GPG to encrypt the file at ``path`` and make it decryptable only
     with the key with fingerprint ``recipient_fingerprint``. The encrypted file
     is given the .gpg extension and its path is returned.

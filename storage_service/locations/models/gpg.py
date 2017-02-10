@@ -12,6 +12,7 @@ from django.db import models
 from django.utils import timezone
 
 # Third party dependencies, alphabetical
+import gnupg
 
 # This project, alphabetical
 from common import utils
