@@ -6,6 +6,7 @@ import django.core.exceptions
 from django.db.models import Count
 
 from locations import models
+from common import gpgutils
 
 
 # CUSTOM WIDGETS
@@ -114,6 +115,13 @@ class DSpaceForm(forms.ModelForm):
     class Meta:
         model = models.DSpace
         fields = ('sd_iri', 'user', 'password', 'metadata_policy')
+
+
+class GPGForm(forms.ModelForm):
+    class Meta:
+        model = models.GPG
+        fields = ('key',)
+
 
 class LocalFilesystemForm(forms.ModelForm):
     class Meta:

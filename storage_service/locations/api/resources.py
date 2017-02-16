@@ -661,15 +661,25 @@ class PackageResource(ModelResource):
         # NOTE this responds to HEAD because AtoM uses HEAD to check for the existence of a package. The storage service has no way to check if the package still exists except by downloading it
         # TODO this needs to be fixed so that HEAD is not identical to GET
 
+        LOGGER.debug('download_request')
+
         # Get AIP details
         package = bundle.obj
 
+        LOGGER.debug('package')
+        LOGGER.debug(package)
+        LOGGER.debug('package.current_path')
+        LOGGER.debug(package.current_path)
+
         # Check if the package is in Arkivum and not actually there
+        LOGGER.debug('download_request 1')
         if package.current_location.space.access_protocol == Space.ARKIVUM:
+            LOGGER.debug('download_request 2')
             is_local = package.current_location.space.get_child_space().is_file_local(
                 package,
                 email_nonlocal=request.method == 'GET',
             )
+            LOGGER.debug('download_request 3')
             if is_local is False:
                 # Need to fetch from tape, return 202
                 return http.HttpAccepted(json.dumps({"error": False, 'message': "File is not locally available.  Contact your storage administrator to fetch it."}))
@@ -677,14 +687,23 @@ class PackageResource(ModelResource):
                 # Arkivum error, return 502
                 return http.HttpResponse(json.dumps({"error": True, "message": "Error checking if file in Arkivum in locally available."}), content_type='application/json', status=502)
 
+        LOGGER.debug('download_request 4')
         lockss_au_number = kwargs.get('chunk_number')
+        LOGGER.debug('download_request 5')
         try:
+            LOGGER.debug('download_request 6')
             temp_dir = None
+            LOGGER.debug('download_request 7')
             full_path = package.get_download_path(lockss_au_number)
+            LOGGER.debug('download_request 8')
         except StorageException:
+            LOGGER.debug('download_request 9')
             full_path, temp_dir = package.compress_package(utils.COMPRESSION_TAR)
+            LOGGER.debug('download_request 10')
 
+        LOGGER.debug('download_request 11')
         response = utils.download_file_stream(full_path)
+        LOGGER.debug('download_request 12')
 
         return response
 

@@ -408,11 +408,13 @@ def space_create(request):
     if request.method == 'POST':
         space_form = forms.SpaceForm(request.POST, prefix='space')
         if space_form.is_valid():
+            LOGGER.debug('space_form is valid')
             # Get access protocol form to validate
             access_protocol = space_form.cleaned_data['access_protocol']
             protocol_form = PROTOCOL[access_protocol]['form'](
                 request.POST, prefix='protocol')
             if protocol_form.is_valid():
+                LOGGER.debug('protocol_form is valid')
                 # If both are valid, save everything
                 space = space_form.save()
                 protocol_obj = protocol_form.save(commit=False)
@@ -420,7 +422,10 @@ def space_create(request):
                 protocol_obj.save()
                 messages.success(request, "Space saved.")
                 return redirect('space_detail', space.uuid)
+            else:
+                LOGGER.debug('protocol_form is NOT valid')
         else:
+            LOGGER.debug('space_form is NOT valid')
             # We need to return the protocol_form so that protocol_form errors
             # are displayed, and so the form doesn't mysterious disappear
             # See if access_protocol has been set
