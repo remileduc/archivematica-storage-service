@@ -5,6 +5,7 @@ import logging
 from lxml import etree
 from lxml.builder import ElementMaker
 import os
+import subprocess
 from uuid import uuid4
 
 # Core Django, alphabetical
@@ -111,18 +112,17 @@ class GPG(models.Model):
         self.space.create_local_directory(dst_path)
         self.space.move_rsync(src_path, dst_path, try_mv_local=True)
         try:
-            encr_path = self._gpg_encrypt(dst_path)
+            encr_path, encr_result = self._gpg_encrypt(dst_path)
         except GPGException:
             # If we fail to encrypt, we send it back where it done came from.
             # TODO/QUESTION: Is this behaviour desirable?
             self.space.move_rsync(dst_path, src_path, try_mv_local=True)
             raise
-        self._update_package(package, encr_path)
+        self._update_pointer_file(package, encr_path, encr_result)
 
-    def _update_package(self, package, encr_path):
-        """Update the package's (AIP's) ``current_path`` in the database as
-        well as its pointer file in order to reflect the encryption event it
-        has undergone.
+    def _update_pointer_file(self, package, encr_path, encr_result):
+        """Update the package's (AIP's) pointer file in order to reflect the
+        encryption event it has undergone.
         """
         # Update the pointer file to contain a record of the encryption.
         # TODO/QUESTION: Allow for AICs too?
@@ -131,10 +131,38 @@ class GPG(models.Model):
             pointer_absolute_path = package.full_pointer_file_path
             root = etree.parse(pointer_absolute_path)
             metsBNS = "{" + utils.NSMAP['mets'] + "}"
-            # Add a new <mets:transformFile> under the <mets:file> for the AIP,
-            # one which indicates that a decryption transform is needed.
+            premisBNS = '{' + utils.NSMAP['premis'] + '}'
+
+            # Set <premis:compositionLevel> to 2 and add <premis:inhibitors>
+            for premis_object_el in root.findall('.//premis:object',
+                                                 namespaces=utils.NSMAP):
+                if premis_object_el.find(
+                        'premis:objectIdentifier/premis:objectIdentifierValue',
+                        namespaces=utils.NSMAP).text.strip() == package.uuid:
+                    # Set <premis:compositionLevel> to 2
+                    obj_char_el = premis_object_el.find(
+                        'premis:objectCharacteristics', namespaces=utils.NSMAP)
+                    compos_level_el = obj_char_el.find(
+                        'premis:compositionLevel', namespaces=utils.NSMAP)
+                    compos_level_el.text = '2'
+                    # When encryption is applied, the objectCharacteristics
+                    # block must include an inhibitors semantic unit.
+                    inhibitor_el = etree.SubElement(
+                        obj_char_el,
+                        premisBNS + 'inhibitors')
+                    etree.SubElement(
+                        inhibitor_el,
+                        premisBNS + 'inhibitorType').text = 'PGP'
+                    etree.SubElement(
+                        inhibitor_el,
+                        premisBNS + 'inhibitorTarget').text = 'All content'
+
             file_el = root.find('.//mets:file', namespaces=utils.NSMAP)
-            if package.uuid in file_el.get('ID', ''):
+            if file_el.get('ID', '').endswith(package.uuid):
+
+                # Add a new <mets:transformFile> under the <mets:file> for the
+                # AIP, one which indicates that a decryption transform is
+                # needed.
                 # TODO/QUESTION: for compression with 7z using bzip2, the
                 # algorithm is "bzip2". Should the algorithm here be "gpg" or
                 # something else?
@@ -180,14 +208,14 @@ class GPG(models.Model):
                 metsBNS + 'mdWrap',
                 MDTYPE='PREMIS:EVENT')
             xmlData = etree.SubElement(mdWrap, metsBNS + 'xmlData')
-            xmlData.append(self.create_encr_event(root))
+            xmlData.append(self.create_encr_event(root, encr_result))
             amdsec.append(digiprovMD)
 
             # Write the modified pointer file to disk.
             with open(pointer_absolute_path, 'w') as fileo:
                 fileo.write(etree.tostring(root, pretty_print=True))
 
-    def create_encr_event(self, root):
+    def create_encr_event(self, root, encr_result):
         """Returns a PREMIS Event for the encryption."""
         # The following vars would typically come from an AM Events model.
         encr_event_type = 'encryption'
@@ -195,10 +223,13 @@ class GPG(models.Model):
         # pointer file.
         encr_event_uuid = str(uuid4())
         encr_event_datetime = timezone.now().isoformat()
-        # TODO/QUESTION: this is listing the Python GnuPG version. Probably
-        # important to also get the system GnuPG version also?
+        # First line of stdout from ``gpg --version`` is expected to be
+        # something like 'gpg (GnuPG) 1.4.16'
+        gpg_version = subprocess.check_output(
+            ['gpg', '--version']).splitlines()[0].split()[-1]
         encr_event_detail = escape(
-            'program=python-gnupg; version={}'.format(gnupg.__version__))
+            'program=gpg (GnuPG); version={}; python-gnupg; version={}'.format(
+                gpg_version, gnupg.__version__))
         # Maybe these should be defined in utils like they are in the
         # dashboard's namespaces.py...
         premisNS = utils.NSMAP['premis']
@@ -238,13 +269,14 @@ class GPG(models.Model):
         eventOutcomeDetail = etree.SubElement(
             eventOutcomeInformation,
             premisBNS + 'eventOutcomeDetail')
-        # TODO: Python GnuPG doesn't give output during encryption. At least, I
-        # couldn't easily find it. What should the text of the
-        # <eventOutcomeDetailNote> element be here?
+        # QUESTION: Python GnuPG gives GPG's stderr during encryption but not
+        # it's stdout. Is the following sufficient?
+        detail_note = 'Status="{}"; Standard Error="{}"'.format(
+            encr_result.status.replace('"', r'\"'),
+            encr_result.stderr.replace('"', r'\"').strip())
         etree.SubElement(
             eventOutcomeDetail,
-            premisBNS + 'eventOutcomeDetailNote').text = escape(
-                'Yay, GnuPG encryption worked!')
+            premisBNS + 'eventOutcomeDetailNote').text = escape(detail_note)
         # Copy the existing <premis:agentIdentifier> data to
         # <premis:linkingAgentIdentifier> elements in our encryption
         # <premis:event>
@@ -291,11 +323,11 @@ class GPG(models.Model):
             raise GPGException(
                 'GPG cannot encrypt a directory. Archive {} first!'.format(
                     path))
-        encr_path = gpgutils.gpg_encrypt_file(path, self.key)
+        encr_path, result = gpgutils.gpg_encrypt_file(path, self.key)
         if os.path.isfile(encr_path):
             LOGGER.info('Successfully encrypted %s at %s', path, encr_path)
             os.remove(path)
-            return encr_path
+            return encr_path, result
         else:
             LOGGER.info('Failed to encrypt %s; storing it unencrypted.', path)
             raise GPGException(

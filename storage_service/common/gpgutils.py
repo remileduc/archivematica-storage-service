@@ -142,13 +142,14 @@ def gpg_decrypt_file(path, decr_path):
 def gpg_encrypt_file(path, recipient_fingerprint):
     """Use GPG to encrypt the file at ``path`` and make it decryptable only
     with the key with fingerprint ``recipient_fingerprint``. The encrypted file
-    is given the .gpg extension and its path is returned.
+    is given the .gpg extension and its path and the Python-GnuPG encryption
+    result <gnupg.Crypt> object are returned.
     """
     encr_path = path + '.gpg'
     with open(path, 'rb') as stream:
-        gpg.encrypt_file(
+        result = gpg.encrypt_file(
             stream,
             [recipient_fingerprint],
             armor=False,
             output=encr_path)
-    return encr_path
+    return encr_path, result
