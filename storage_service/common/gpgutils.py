@@ -4,7 +4,7 @@ Contains utilities for interacting with gnupg, i.e., Python GPG. This is
 functionality for listing and creating private/public GPG keys for encrypting
 and decrypting things. It is in its own utility because this functionality is
 needed by both the GPG space and the administration view which can be used to
-manage (i.e., list, created, delete) GPG keys.
+manage (i.e., list, created, import, delete) GPG keys.
 
 """
 
@@ -113,10 +113,10 @@ def import_gpg_key(ascii_armor):
 
 
 def export_gpg_key(fingerprint):
-    """Return the ASCII armor (string) representation of the private key with
-    fingerprint ``fingerprint``.
+    """Return the ASCII armor (string) representation of the private and public
+    keys with fingerprint ``fingerprint``.
     """
-    return gpg.export_keys(fingerprint, True)
+    return gpg.export_keys(fingerprint), gpg.export_keys(fingerprint, True)
 
 
 def delete_gpg_key(fingerprint):

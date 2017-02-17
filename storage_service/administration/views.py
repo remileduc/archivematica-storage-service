@@ -105,7 +105,7 @@ def key_detail(request, key_fingerprint):
         raise Http404(
             'GPG key with fingerprint {} does not exist.'.format(
                 key_fingerprint))
-    armor = gpgutils.export_gpg_key(key['fingerprint'])
+    public_armor, private_armor = gpgutils.export_gpg_key(key['fingerprint'])
     return render(request, 'administration/key_detail.html', locals())
 
 
