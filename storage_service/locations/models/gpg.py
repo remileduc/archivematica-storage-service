@@ -129,7 +129,8 @@ class GPG(models.Model):
         if (    package.pointer_file_path and
                 package.package_type in (Package.AIP,)):
             pointer_absolute_path = package.full_pointer_file_path
-            root = etree.parse(pointer_absolute_path)
+            parser = etree.XMLParser(remove_blank_text=True)
+            root = etree.parse(pointer_absolute_path, parser)
             metsBNS = "{" + utils.NSMAP['mets'] + "}"
             premisBNS = '{' + utils.NSMAP['premis'] + '}'
 
@@ -239,8 +240,8 @@ class GPG(models.Model):
         event = etree.Element(
             premisBNS + 'event', nsmap={'premis': premisNS})
         event.set(xsiBNS + 'schemaLocation',
-                    premisNS + ' http://www.loc.gov/standards/premis/'
-                                'v2/premis-v2-2.xsd')
+                  premisNS + ' http://www.loc.gov/standards/premis/'
+                             'v2/premis-v2-2.xsd')
         event.set('version', '2.2')
         eventIdentifier = etree.SubElement(
             event,
