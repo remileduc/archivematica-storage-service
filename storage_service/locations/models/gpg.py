@@ -44,6 +44,10 @@ class GPG(models.Model):
     ``delete_path`` methods.
     """
 
+    # package.py looks up this class attribute to determine if a package is
+    # encrypted.
+    encrypted_space = True
+
     space = models.OneToOneField('Space', to_field='uuid')
 
     # The ``key`` attribute of a GPG "space" is the fingerprint (string) of an
@@ -85,8 +89,9 @@ class GPG(models.Model):
         because oftentimes the "move to/from" operations are more accurately
         "copy to/from" operations.
         """
-        src_path = src_path + '.gpg'
-        dst_path = dst_path + '.gpg'
+        # src_path = src_path + '.gpg'
+        # dst_path = dst_path + '.gpg'
+
         LOGGER.info('GPG ``move_to_storage_service``')
         LOGGER.info('GPG move_to_storage_service encrypted src_path: %s',
                      src_path)
@@ -114,7 +119,7 @@ class GPG(models.Model):
         try:
             encr_path, encr_result = self._gpg_encrypt(dst_path)
         except GPGException:
-            # If we fail to encrypt, we send it back where it done came from.
+            # If we fail to encrypt, then we send it back to where it came from.
             # TODO/QUESTION: Is this behaviour desirable?
             self.space.move_rsync(dst_path, src_path, try_mv_local=True)
             raise
@@ -328,7 +333,8 @@ class GPG(models.Model):
         if os.path.isfile(encr_path):
             LOGGER.info('Successfully encrypted %s at %s', path, encr_path)
             os.remove(path)
-            return encr_path, result
+            os.rename(encr_path, path)
+            return path, result
         else:
             LOGGER.info('Failed to encrypt %s; storing it unencrypted.', path)
             raise GPGException(
@@ -343,12 +349,17 @@ class GPG(models.Model):
             LOGGER.error('There is no path at %s to decrypt.', path)
             raise GPGException('Cannot decrypt file at {}; no such'
                             ' file.'.format(path))
-        decr_path, _ = os.path.splitext(path)
+
+        # decr_path, _ = os.path.splitext(path)
+        decr_path = path + '.decrypted'
+
         decr_result = gpgutils.gpg_decrypt_file(path, decr_path)
         if decr_result.ok and os.path.isfile(decr_path):
             LOGGER.info('Successfully decrypted %s to %s.', path, decr_path)
             os.remove(path)
-            return decr_path
+            os.rename(decr_path, path)
+            #return decr_path
+            return path
         else:
             LOGGER.info('Failed to decrypt %s. Reason: %s', path,
                          decr_result.status)

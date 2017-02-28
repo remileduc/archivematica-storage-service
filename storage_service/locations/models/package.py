@@ -143,9 +143,11 @@ class Package(models.Model):
 
     def is_encrypted(self, local_path):
         """Determines whether or not the package at ``local_path`` is
-        encrypted.
+        encrypted. Note that we can't compare the type of the child space to
+        GPG because that would cause a circular import.
         """
-        return os.path.splitext(local_path)[1] == '.gpg'
+        return getattr(self.current_location.space.get_child_space(),
+                       'encrypted_space', False)
 
     @property
     def is_compressed(self):
@@ -222,7 +224,6 @@ class Package(models.Model):
         copy to SS Internal Location, and return that path.
 
         :returns: Local path to this package.
-        TODO: this fails with GPG spaces because instead of copying it moves!
         """
         local_path = self.get_local_path()
         if local_path and not self.is_encrypted(local_path):
@@ -484,8 +485,7 @@ class Package(models.Model):
             element = root.find('.//mets:file', namespaces=utils.NSMAP)
             flocat = element.find('mets:FLocat', namespaces=utils.NSMAP)
             if self.uuid in element.get('ID', '') and flocat is not None:
-                xlink_href = self._get_flocat_xlink_href_path(self.full_path)
-                flocat.set('{{{ns}}}href'.format(ns=utils.NSMAP['xlink']), xlink_href)
+                flocat.set('{{{ns}}}href'.format(ns=utils.NSMAP['xlink']), self.full_path)
             # Add USE="Archival Information Package" to fileGrp.  Required for
             # LOCKSS, and not provided in Archivematica <=1.1
             if root.find('.//mets:fileGrp[@USE="Archival Information Package"]', namespaces=utils.NSMAP) is not None:
@@ -493,19 +493,6 @@ class Package(models.Model):
 
             with open(pointer_absolute_path, 'w') as f:
                 f.write(etree.tostring(root, pretty_print=True))
-
-    def _get_flocat_xlink_href_path(self, full_path):
-        """Return the path that should valuate the xlink:href attribute of the
-        <mets:FLocat> element. If the package is encrypted, the .gpg extension
-        is added.
-        """
-        xlink_href = full_path
-        encr_path = full_path + '.gpg'
-        if (    (not os.path.isdir(full_path)) and
-                (not os.path.isfile(full_path)) and
-                os.path.isfile(encr_path)):
-            xlink_href = encr_path
-        return xlink_href
 
     def extract_file(self, relative_path='', extract_path=None):
         """
@@ -1348,8 +1335,7 @@ class Package(models.Model):
         # Update FLocat to full path
         file_ = root.find('.//mets:fileGrp[@USE="Archival Information Package"]/mets:file', namespaces=utils.NSMAP)
         flocat = file_.find('mets:FLocat[@OTHERLOCTYPE="SYSTEM"][@LOCTYPE="OTHER"]', namespaces=utils.NSMAP)
-        xlink_href = self._get_flocat_xlink_href_path(self.full_path)
-        flocat.set(utils.PREFIX_NS['xlink'] + 'href', xlink_href)
+        flocat.set(utils.PREFIX_NS['xlink'] + 'href', self.full_path)
 
         # Update fixity checksum
         fixity_elem = root.find('.//premis:fixity', namespaces=utils.NSMAP)
