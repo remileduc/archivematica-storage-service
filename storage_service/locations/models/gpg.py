@@ -130,7 +130,7 @@ class GPG(models.Model):
         # Update the pointer file to contain a record of the encryption.
         # TODO/QUESTION: Allow for AICs too?
         if (    package.pointer_file_path and
-                package.package_type in (Package.AIP,)):
+                package.package_type in (Package.AIP, Package.AIC)):
             pointer_absolute_path = package.full_pointer_file_path
             parser = etree.XMLParser(remove_blank_text=True)
             root = etree.parse(pointer_absolute_path, parser)
