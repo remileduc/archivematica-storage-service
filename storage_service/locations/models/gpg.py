@@ -5,7 +5,9 @@ import logging
 from lxml import etree
 from lxml.builder import ElementMaker
 import os
+import shutil
 import subprocess
+import tarfile
 from uuid import uuid4
 
 # Core Django, alphabetical
@@ -89,9 +91,6 @@ class GPG(models.Model):
         because oftentimes the "move to/from" operations are more accurately
         "copy to/from" operations.
         """
-        # src_path = src_path + '.gpg'
-        # dst_path = dst_path + '.gpg'
-
         LOGGER.info('GPG ``move_to_storage_service``')
         LOGGER.info('GPG move_to_storage_service encrypted src_path: %s',
                      src_path)
@@ -99,7 +98,6 @@ class GPG(models.Model):
                      dst_path)
         self.space.create_local_directory(dst_path)
         self.space.move_rsync(src_path, dst_path)
-        # decr_path is .gpg-less
         decr_path = self._gpg_decrypt(dst_path)
 
     def move_from_storage_service(self, src_path, dst_path, package=None):
@@ -165,7 +163,6 @@ class GPG(models.Model):
 
             file_el = root.find('.//mets:file', namespaces=utils.NSMAP)
             if file_el.get('ID', '').endswith(package.uuid):
-
                 # Add a new <mets:transformFile> under the <mets:file> for the
                 # AIP, one which indicates that a decryption transform is
                 # needed.
@@ -220,6 +217,10 @@ class GPG(models.Model):
             # Write the modified pointer file to disk.
             with open(pointer_absolute_path, 'w') as fileo:
                 fileo.write(etree.tostring(root, pretty_print=True))
+        else:
+            LOGGER.warning('Unable to add encryption metadata to package %s'
+                           ' since it has no pointer file; it must be an'
+                           ' uncompressed package.', package.uuid)
 
     def create_encr_event(self, root, encr_result):
         """Returns a PREMIS Event for the encryption."""
@@ -318,17 +319,11 @@ class GPG(models.Model):
         return 'digiprovMD_1'
 
     def _gpg_encrypt(self, path):
-        """Use GnuPG to encrypt the file at ``path`` using this GPG Space's GPG
-        key.
-        TODO/QUESTIONS:
-        - Should the unencrypted file at ``path`` be destroyed
-          post-encryption (as is currently done)?
-        - How to handle ``path`` as directory? Currently raising an exception
+        """Use GnuPG to encrypt the package at ``path`` using this GPG Space's
+        GPG key.
         """
         if os.path.isdir(path):
-            raise GPGException(
-                'GPG cannot encrypt a directory. Archive {} first!'.format(
-                    path))
+            _create_tar(path)
         encr_path, result = gpgutils.gpg_encrypt_file(path, self.key)
         if os.path.isfile(encr_path):
             LOGGER.info('Successfully encrypted %s at %s', path, encr_path)
@@ -336,35 +331,35 @@ class GPG(models.Model):
             os.rename(encr_path, path)
             return path, result
         else:
-            LOGGER.info('Failed to encrypt %s; storing it unencrypted.', path)
-            raise GPGException(
-                'Something went wrong when attempting to encrypt'
-                ' {}'.format(path))
+            fail_msg = ('An error occured when attempting to encrypt'
+                        ' {}'.format(path))
+            LOGGER.error(fail_msg)
+            raise GPGException(fail_msg)
 
     def _gpg_decrypt(self, path):
         """Use GnuPG to decrypt the file at ``path`` and then delete the
         encrypted file.
         """
         if not os.path.isfile(path):
-            LOGGER.error('There is no path at %s to decrypt.', path)
-            raise GPGException('Cannot decrypt file at {}; no such'
-                            ' file.'.format(path))
-
-        # decr_path, _ = os.path.splitext(path)
+            fail_msg = 'Cannot decrypt file at {}; no such file.'.format(path)
+            LOGGER.error(fail_msg)
+            raise GPGException(fail_msg)
         decr_path = path + '.decrypted'
-
         decr_result = gpgutils.gpg_decrypt_file(path, decr_path)
         if decr_result.ok and os.path.isfile(decr_path):
             LOGGER.info('Successfully decrypted %s to %s.', path, decr_path)
             os.remove(path)
             os.rename(decr_path, path)
-            #return decr_path
-            return path
         else:
-            LOGGER.info('Failed to decrypt %s. Reason: %s', path,
-                         decr_result.status)
-            raise GPGException('Failed to decrypt file at {}. Reason:'
-                               ' {}'.format(path, decr_result.status))
+            fail_msg = 'Failed to decrypt {}. Reason: {}'.format(
+                path, decr_result.status)
+            LOGGER.info(fail_msg)
+            raise GPGException(fail_msg)
+        # A tarfile without an extension is one that we created in this space
+        # using an uncompressed AIP as input. We extract those here.
+        if tarfile.is_tarfile(path) and os.path.splitext(path)[1] == '':
+            _extract_tar(path)
+        return path
 
     def verify(self):
         """ Verify that the space is accessible to the storage service. """
@@ -385,3 +380,46 @@ def escape(string):
     if isinstance(string, str):
         string = string.decode('utf-8', errors='replace')
     return string
+
+
+def _create_tar(path):
+    """Create a tarfile from the directory at ``path`` and overwrite ``path``
+    with that tarfile.
+    """
+    tarpath = '{}.tar'.format(path)
+    changedir = os.path.dirname(tarpath)
+    source = os.path.basename(path)
+    cmd = ['tar', '-C', changedir, '-cf', tarpath, source]
+    LOGGER.info('creating archive of {} at {}, relative to {}'.format(
+        source, tarpath, changedir))
+    subprocess.check_output(cmd)
+    fail_msg = 'Failed to create a tarfile at {} for dir at {}'.format(
+        tarpath, path)
+    if os.path.isfile(tarpath) and tarfile.is_tarfile(tarpath):
+        shutil.rmtree(path)
+        os.rename(tarpath, path)
+    else:
+        LOGGER.error(fail_msg)
+        raise GPGException(fail_msg)
+    try:
+        assert tarfile.is_tarfile(path)
+        assert not os.path.exists(tarpath)
+    except AssertionError:
+        LOGGER.error(fail_msg)
+        raise GPGException(fail_msg)
+
+
+def _extract_tar(tarpath):
+    """Extract tarfile at ``path`` to a directory at ``path``."""
+    newtarpath = '{}.tar'.format(tarpath)
+    os.rename(tarpath, newtarpath)
+    changedir = os.path.dirname(newtarpath)
+    cmd = ['tar', '-xf', newtarpath, '-C', changedir]
+    subprocess.check_output(cmd)
+    if os.path.isdir(tarpath):
+        os.remove(newtarpath)
+    else:
+        fail_msg = ('Failed to extract {} to a directory at the same'
+                    ' location.'.format(tarpath))
+        LOGGER.error(fail_msg)
+        raise GPGException(fail_msg)
