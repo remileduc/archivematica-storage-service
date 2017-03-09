@@ -2,13 +2,13 @@ from __future__ import absolute_import
 # stdlib, alphabetical
 import datetime
 import logging
-from lxml import etree
-from lxml.builder import ElementMaker
 import os
 import shutil
 import subprocess
 import tarfile
 from uuid import uuid4
+
+from lxml import etree
 
 # Core Django, alphabetical
 from django.db import models
@@ -77,7 +77,8 @@ class GPG(models.Model):
         app_label = 'locations'
 
     ALLOWED_LOCATION_PURPOSE = [
-        Location.AIP_STORAGE
+        Location.AIP_STORAGE,
+        Location.BACKLOG
     ]
 
     def move_to_storage_service(self, src_path, dst_path, dst_space):
@@ -93,12 +94,38 @@ class GPG(models.Model):
         """
         LOGGER.info('GPG ``move_to_storage_service``')
         LOGGER.info('GPG move_to_storage_service encrypted src_path: %s',
-                     src_path)
+                    src_path)
         LOGGER.info('GPG move_to_storage_service encrypted dst_path: %s',
-                     dst_path)
+                    dst_path)
         self.space.create_local_directory(dst_path)
-        self.space.move_rsync(src_path, dst_path)
-        decr_path = self._gpg_decrypt(dst_path)
+        # When the source path exists, we are moving the entire package to
+        # somewhere on the storage service. In this case, we decrypt at the
+        # destination.
+        if os.path.exists(src_path):
+            self.space.move_rsync(src_path, dst_path)
+            decr_path = _gpg_decrypt(dst_path)
+        # When the source path does NOT exist, we are copying a single file or
+        # directory from within an encrypted package, e.g., during SIP arrange.
+        # Here we must decrypt, copy, and then re-encrypt. This seems like it
+        # would be terribly inefficient when dealing with large transfers.
+        else:
+            encr_path = _get_encrypted_path(src_path)
+            if not encr_path:
+                raise GPGException(
+                    'Unable to move %s; this file/dir does not exist; nor is'
+                    ' it in an encrypted directory.', src_path)
+            decr_path = _gpg_decrypt(encr_path)
+            try:
+                if os.path.exists(src_path):
+                    self.space.move_rsync(src_path, dst_path)
+                else:
+                    raise GPGException(
+                        'Unable to move %s; this file/dir does not exist, not'
+                        ' even in encrypted directory %s.', src_path, encr_path)
+            finally:
+                # Re-encrypt the decrypted package at source after copy, no
+                # matter what happens.
+                self._gpg_encrypt(encr_path)
 
     def move_from_storage_service(self, src_path, dst_path, package=None):
         """Move AIP in SS at path ``src_path`` to GPG space at ``dst_path``,
@@ -115,20 +142,73 @@ class GPG(models.Model):
         self.space.create_local_directory(dst_path)
         self.space.move_rsync(src_path, dst_path, try_mv_local=True)
         try:
-            encr_path, encr_result = self._gpg_encrypt(dst_path)
+            _, encr_result = self._gpg_encrypt(dst_path)
         except GPGException:
             # If we fail to encrypt, then we send it back to where it came from.
             # TODO/QUESTION: Is this behaviour desirable?
             self.space.move_rsync(dst_path, src_path, try_mv_local=True)
             raise
-        self._update_pointer_file(package, encr_path, encr_result)
+        self._update_pointer_file(package, encr_result)
 
-    def _update_pointer_file(self, package, encr_path, encr_result):
+    def browse(self, path):
+        """Returns browse results for a locally accessible *encrypted*
+        filesystem. Based on ``Space.browse_local`` but has to deal with paths
+        within encrypted directories (which are tarfiles).
+        """
+        if isinstance(path, unicode):
+            path = str(path)
+        # Encrypted space only stores files, so strip trailing /.
+        path = path.rstrip('/')
+        # Path may not exist if its a sub-path of an encrypted dir. Here we
+        # look for a path ancestor that does exist.
+        encr_path = _get_encrypted_path(path)
+        if not encr_path:
+            LOGGER.warning(
+                'Unable to browse %s; this file/dir does not exist; nor is'
+                ' it in an encrypted directory.', path)
+            return {'directories': [], 'entries': [], 'properties': {}}
+        # Decrypt and de-tar
+        _gpg_decrypt(encr_path)
+        # After decryption, ``path`` should exist if it is valid.
+        if not os.path.exists(path):
+            LOGGER.warning('Path %s in %s does not exist.', path, encr_path)
+            self._gpg_encrypt(encr_path)
+            return {'directories': [], 'entries': [], 'properties': {}}
+        try:
+            properties = {}
+            entries = [name for name in os.listdir(path) if name[0] != '.']
+            entries = sorted(entries, key=lambda s: s.lower())
+            directories = []
+            for name in entries:
+                full_path = os.path.join(path, name)
+                properties[name] = {'size': os.path.getsize(full_path)}
+                if os.path.isdir(full_path) and os.access(full_path, os.R_OK):
+                    directories.append(name)
+                    properties[name]['object count'] = (
+                        self.space._count_objects_in_directory(full_path))
+        finally:
+            # No matter what happens, re-encrypt the decrypted package.
+            self._gpg_encrypt(encr_path)
+        return {
+            'directories': directories,
+            'entries': entries,
+            'properties': properties
+        }
+
+    def verify(self):
+        """Verify that the space is accessible to the storage service. """
+        # QUESTION: What is the purpose of this method? Investigation
+        # shows that the ``NFS`` and ``Fedora`` spaces define and use it while
+        # ``LocalFilesystem`` defines it but does not use it.
+        verified = os.path.isdir(self.space.path)
+        self.space.verified = verified
+        self.space.last_verified = datetime.datetime.now()
+
+    def _update_pointer_file(self, package, encr_result):
         """Update the package's (AIP's) pointer file in order to reflect the
         encryption event it has undergone.
         """
         # Update the pointer file to contain a record of the encryption.
-        # TODO/QUESTION: Allow for AICs too?
         if (    package.pointer_file_path and
                 package.package_type in (Package.AIP, Package.AIC)):
             pointer_absolute_path = package.full_pointer_file_path
@@ -166,14 +246,7 @@ class GPG(models.Model):
                 # Add a new <mets:transformFile> under the <mets:file> for the
                 # AIP, one which indicates that a decryption transform is
                 # needed.
-                # TODO/QUESTION: for compression with 7z using bzip2, the
-                # algorithm is "bzip2". Should the algorithm here be "gpg" or
-                # something else?
                 algorithm = 'gpg'
-                # TODO/QUESTION: here we add a TRANSFORMKEY attr valuated to
-                # the fingerprint of the GPG private key needed to decrypt this
-                # AIP. Is this correct? From METS docs: "A key to be used with
-                # the transform algorithm for accessing the file's contents."
                 etree.SubElement(
                     file_el,
                     metsBNS + "transformFile",
@@ -194,15 +267,17 @@ class GPG(models.Model):
                     decompr_transform_el.set('TRANSFORMORDER', '2')
 
             # Add a <PREMIS:EVENT> for the encryption event
-            # TODO/QUESTION: the pipeline is usually responsible for creating
-            # these things in the pointer file. The createPointerFile.py client
-            # script, in particular, creates these digiprovMD elements based on
-            # events and agents in the pipeline's database. In this case, we are
-            # encrypting in the storage service and creating PREMIS events in the
-            # pointer file that are *not* also recorded in the database (SS's or
-            # AM's). Just pointint out the discrepancy.
+
+            # TODO/QUESTION: in other contexts, the pipeline is responsible for
+            # creating these things in the pointer file. The
+            # createPointerFile.py client script, in particular, creates these
+            # digiprovMD elements based on events and agents in the pipeline's
+            # database. In this case, we are encrypting in the storage service
+            # and creating PREMIS events in the pointer file that are *not*
+            # also recorded in the database (SS's or AM's). Just pointing out
+            # the discrepancy.
             amdsec = root.find('.//mets:amdSec', namespaces=utils.NSMAP)
-            next_digiprov_md_id = self.get_next_digiprov_md_id(root)
+            next_digiprov_md_id = _get_next_digiprov_md_id(root)
             digiprovMD = etree.Element(
                 metsBNS + 'digiprovMD',
                 ID=next_digiprov_md_id)
@@ -211,7 +286,7 @@ class GPG(models.Model):
                 metsBNS + 'mdWrap',
                 MDTYPE='PREMIS:EVENT')
             xmlData = etree.SubElement(mdWrap, metsBNS + 'xmlData')
-            xmlData.append(self.create_encr_event(root, encr_result))
+            xmlData.append(_create_encr_event(root, encr_result))
             amdsec.append(digiprovMD)
 
             # Write the modified pointer file to disk.
@@ -221,102 +296,6 @@ class GPG(models.Model):
             LOGGER.warning('Unable to add encryption metadata to package %s'
                            ' since it has no pointer file; it must be an'
                            ' uncompressed package.', package.uuid)
-
-    def create_encr_event(self, root, encr_result):
-        """Returns a PREMIS Event for the encryption."""
-        # The following vars would typically come from an AM Events model.
-        encr_event_type = 'encryption'
-        # Note the UUID is created here with no other record besides the
-        # pointer file.
-        encr_event_uuid = str(uuid4())
-        encr_event_datetime = timezone.now().isoformat()
-        # First line of stdout from ``gpg --version`` is expected to be
-        # something like 'gpg (GnuPG) 1.4.16'
-        gpg_version = subprocess.check_output(
-            ['gpg', '--version']).splitlines()[0].split()[-1]
-        encr_event_detail = escape(
-            'program=gpg (GnuPG); version={}; python-gnupg; version={}'.format(
-                gpg_version, gnupg.__version__))
-        # Maybe these should be defined in utils like they are in the
-        # dashboard's namespaces.py...
-        premisNS = utils.NSMAP['premis']
-        premisBNS = '{' + premisNS + '}'
-        xsiNS = utils.NSMAP['xsi']
-        xsiBNS = '{' + xsiNS + '}'
-        event = etree.Element(
-            premisBNS + 'event', nsmap={'premis': premisNS})
-        event.set(xsiBNS + 'schemaLocation',
-                  premisNS + ' http://www.loc.gov/standards/premis/'
-                             'v2/premis-v2-2.xsd')
-        event.set('version', '2.2')
-        eventIdentifier = etree.SubElement(
-            event,
-            premisBNS + 'eventIdentifier')
-        etree.SubElement(
-            eventIdentifier,
-            premisBNS + 'eventIdentifierType').text = 'UUID'
-        etree.SubElement(
-            eventIdentifier,
-            premisBNS + 'eventIdentifierValue').text = encr_event_uuid
-        etree.SubElement(
-            event,
-            premisBNS + 'eventType').text = encr_event_type
-        etree.SubElement(
-            event,
-            premisBNS + 'eventDateTime').text = encr_event_datetime
-        etree.SubElement(
-            event,
-            premisBNS + 'eventDetail').text = encr_event_detail
-        eventOutcomeInformation = etree.SubElement(
-            event,
-            premisBNS + 'eventOutcomeInformation')
-        etree.SubElement(
-            eventOutcomeInformation,
-            premisBNS + 'eventOutcome').text = '' # No eventOutcome text at present ...
-        eventOutcomeDetail = etree.SubElement(
-            eventOutcomeInformation,
-            premisBNS + 'eventOutcomeDetail')
-        # QUESTION: Python GnuPG gives GPG's stderr during encryption but not
-        # it's stdout. Is the following sufficient?
-        detail_note = 'Status="{}"; Standard Error="{}"'.format(
-            encr_result.status.replace('"', r'\"'),
-            encr_result.stderr.replace('"', r'\"').strip())
-        etree.SubElement(
-            eventOutcomeDetail,
-            premisBNS + 'eventOutcomeDetailNote').text = escape(detail_note)
-        # Copy the existing <premis:agentIdentifier> data to
-        # <premis:linkingAgentIdentifier> elements in our encryption
-        # <premis:event>
-        for agent_id_el in root.findall(
-                './/premis:agentIdentifier', namespaces=utils.NSMAP):
-            agent_id_type = agent_id_el.find('premis:agentIdentifierType',
-                                                namespaces=utils.NSMAP).text
-            agent_id_value = agent_id_el.find('premis:agentIdentifierValue',
-                                                namespaces=utils.NSMAP).text
-            linkingAgentIdentifier = etree.SubElement(
-                event,
-                premisBNS + 'linkingAgentIdentifier')
-            etree.SubElement(
-                linkingAgentIdentifier,
-                premisBNS + 'linkingAgentIdentifierType').text = agent_id_type
-            etree.SubElement(
-                linkingAgentIdentifier,
-                premisBNS + 'linkingAgentIdentifierValue').text = agent_id_value
-        return event
-
-    def get_next_digiprov_md_id(self, root):
-        """Return the next digiprovMD ID attribute; something like
-        ``'digiprovMD_X'``, where X is an int.
-        """
-        ids = []
-        for digiprov_md_el in root.findall(
-                './/mets:digiprovMD', namespaces=utils.NSMAP):
-            digiprov_md_id = int(digiprov_md_el.get('ID').replace(
-                'digiprovMD_', ''))
-            ids.append(digiprov_md_id)
-        if ids:
-            return 'digiprovMD_{}'.format(max(ids) + 1)
-        return 'digiprovMD_1'
 
     def _gpg_encrypt(self, path):
         """Use GnuPG to encrypt the package at ``path`` using this GPG Space's
@@ -335,41 +314,6 @@ class GPG(models.Model):
                         ' {}'.format(path))
             LOGGER.error(fail_msg)
             raise GPGException(fail_msg)
-
-    def _gpg_decrypt(self, path):
-        """Use GnuPG to decrypt the file at ``path`` and then delete the
-        encrypted file.
-        """
-        if not os.path.isfile(path):
-            fail_msg = 'Cannot decrypt file at {}; no such file.'.format(path)
-            LOGGER.error(fail_msg)
-            raise GPGException(fail_msg)
-        decr_path = path + '.decrypted'
-        decr_result = gpgutils.gpg_decrypt_file(path, decr_path)
-        if decr_result.ok and os.path.isfile(decr_path):
-            LOGGER.info('Successfully decrypted %s to %s.', path, decr_path)
-            os.remove(path)
-            os.rename(decr_path, path)
-        else:
-            fail_msg = 'Failed to decrypt {}. Reason: {}'.format(
-                path, decr_result.status)
-            LOGGER.info(fail_msg)
-            raise GPGException(fail_msg)
-        # A tarfile without an extension is one that we created in this space
-        # using an uncompressed AIP as input. We extract those here.
-        if tarfile.is_tarfile(path) and os.path.splitext(path)[1] == '':
-            _extract_tar(path)
-        return path
-
-    def verify(self):
-        """ Verify that the space is accessible to the storage service. """
-        # TODO: Why is this method here? What is its purpose? Investigation
-        # shows that the ``NFS`` and ``Fedora`` spaces define and use it while
-        # ``LocalFilesystem`` defines it but does not use it.
-        # TODO run script to verify that it works
-        verified = os.path.isdir(self.space.path)
-        self.space.verified = verified
-        self.space.last_verified = datetime.datetime.now()
 
 
 # This replaces non-unicode characters with a replacement character,
@@ -390,8 +334,8 @@ def _create_tar(path):
     changedir = os.path.dirname(tarpath)
     source = os.path.basename(path)
     cmd = ['tar', '-C', changedir, '-cf', tarpath, source]
-    LOGGER.info('creating archive of {} at {}, relative to {}'.format(
-        source, tarpath, changedir))
+    LOGGER.info('creating archive of %s at %s, relative to %s',
+                source, tarpath, changedir)
     subprocess.check_output(cmd)
     fail_msg = 'Failed to create a tarfile at {} for dir at {}'.format(
         tarpath, path)
@@ -423,3 +367,143 @@ def _extract_tar(tarpath):
                     ' location.'.format(tarpath))
         LOGGER.error(fail_msg)
         raise GPGException(fail_msg)
+
+
+def _create_encr_event(root, encr_result):
+    """Returns a PREMIS Event for the encryption."""
+    # The following vars would typically come from an AM Events model.
+    encr_event_type = 'encryption'
+    # Note the UUID is created here with no other record besides the
+    # pointer file.
+    encr_event_uuid = str(uuid4())
+    encr_event_datetime = timezone.now().isoformat()
+    # First line of stdout from ``gpg --version`` is expected to be
+    # something like 'gpg (GnuPG) 1.4.16'
+    gpg_version = subprocess.check_output(
+        ['gpg', '--version']).splitlines()[0].split()[-1]
+    encr_event_detail = escape(
+        'program=gpg (GnuPG); version={}; python-gnupg; version={}'.format(
+            gpg_version, gnupg.__version__))
+    # Maybe these should be defined in utils like they are in the
+    # dashboard's namespaces.py...
+    premisNS = utils.NSMAP['premis']
+    premisBNS = '{' + premisNS + '}'
+    xsiNS = utils.NSMAP['xsi']
+    xsiBNS = '{' + xsiNS + '}'
+    event = etree.Element(
+        premisBNS + 'event', nsmap={'premis': premisNS})
+    event.set(xsiBNS + 'schemaLocation',
+              premisNS + ' http://www.loc.gov/standards/premis/'
+                         'v2/premis-v2-2.xsd')
+    event.set('version', '2.2')
+    eventIdentifier = etree.SubElement(
+        event,
+        premisBNS + 'eventIdentifier')
+    etree.SubElement(
+        eventIdentifier,
+        premisBNS + 'eventIdentifierType').text = 'UUID'
+    etree.SubElement(
+        eventIdentifier,
+        premisBNS + 'eventIdentifierValue').text = encr_event_uuid
+    etree.SubElement(
+        event,
+        premisBNS + 'eventType').text = encr_event_type
+    etree.SubElement(
+        event,
+        premisBNS + 'eventDateTime').text = encr_event_datetime
+    etree.SubElement(
+        event,
+        premisBNS + 'eventDetail').text = encr_event_detail
+    eventOutcomeInformation = etree.SubElement(
+        event,
+        premisBNS + 'eventOutcomeInformation')
+    etree.SubElement(
+        eventOutcomeInformation,
+        premisBNS + 'eventOutcome').text = '' # No eventOutcome text at present ...
+    eventOutcomeDetail = etree.SubElement(
+        eventOutcomeInformation,
+        premisBNS + 'eventOutcomeDetail')
+    # QUESTION: Python GnuPG gives GPG's stderr during encryption but not
+    # it's stdout. Is the following sufficient?
+    detail_note = 'Status="{}"; Standard Error="{}"'.format(
+        encr_result.status.replace('"', r'\"'),
+        encr_result.stderr.replace('"', r'\"').strip())
+    etree.SubElement(
+        eventOutcomeDetail,
+        premisBNS + 'eventOutcomeDetailNote').text = escape(detail_note)
+    # Copy the existing <premis:agentIdentifier> data to
+    # <premis:linkingAgentIdentifier> elements in our encryption
+    # <premis:event>
+    for agent_id_el in root.findall(
+            './/premis:agentIdentifier', namespaces=utils.NSMAP):
+        agent_id_type = agent_id_el.find('premis:agentIdentifierType',
+                                         namespaces=utils.NSMAP).text
+        agent_id_value = agent_id_el.find('premis:agentIdentifierValue',
+                                          namespaces=utils.NSMAP).text
+        linkingAgentIdentifier = etree.SubElement(
+            event,
+            premisBNS + 'linkingAgentIdentifier')
+        etree.SubElement(
+            linkingAgentIdentifier,
+            premisBNS + 'linkingAgentIdentifierType').text = agent_id_type
+        etree.SubElement(
+            linkingAgentIdentifier,
+            premisBNS + 'linkingAgentIdentifierValue').text = agent_id_value
+    return event
+
+
+def _get_next_digiprov_md_id(root):
+    """Return the next digiprovMD ID attribute; something like
+    ``'digiprovMD_X'``, where X is an int.
+    """
+    ids = []
+    for digiprov_md_el in root.findall(
+            './/mets:digiprovMD', namespaces=utils.NSMAP):
+        digiprov_md_id = int(digiprov_md_el.get('ID').replace(
+            'digiprovMD_', ''))
+        ids.append(digiprov_md_id)
+    if ids:
+        return 'digiprovMD_{}'.format(max(ids) + 1)
+    return 'digiprovMD_1'
+
+
+def _gpg_decrypt(path):
+    """Use GnuPG to decrypt the file at ``path`` and then delete the
+    encrypted file.
+    """
+    if not os.path.isfile(path):
+        fail_msg = 'Cannot decrypt file at {}; no such file.'.format(path)
+        LOGGER.error(fail_msg)
+        raise GPGException(fail_msg)
+    decr_path = path + '.decrypted'
+    decr_result = gpgutils.gpg_decrypt_file(path, decr_path)
+    if decr_result.ok and os.path.isfile(decr_path):
+        LOGGER.info('Successfully decrypted %s to %s.', path, decr_path)
+        os.remove(path)
+        os.rename(decr_path, path)
+    else:
+        fail_msg = 'Failed to decrypt {}. Reason: {}'.format(
+            path, decr_result.status)
+        LOGGER.info(fail_msg)
+        raise GPGException(fail_msg)
+    # A tarfile without an extension is one that we created in this space
+    # using an uncompressed AIP as input. We extract those here.
+    if tarfile.is_tarfile(path) and os.path.splitext(path)[1] == '':
+        LOGGER.info('%s is a tarfile so we are extracting it', path)
+        _extract_tar(path)
+    return path
+
+
+def _get_encrypted_path(encr_path):
+    """Attempt to return the existing file path that is ``encr_path`` or
+    one of its ancestor paths. This is needed when we are asked to move a
+    source path that may be located within an encrypted and compressed
+    directory; in these cases, the source path itself will not exist so we
+    are looking for an ancestor that is an encrypted file.
+    """
+    while not os.path.isfile(encr_path):
+        encr_path = os.path.dirname(encr_path)
+        if not encr_path:
+            encr_path = None
+            break
+    return encr_path
